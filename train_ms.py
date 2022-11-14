@@ -3,6 +3,8 @@ import json
 import argparse
 import itertools
 import math
+import time
+
 import torch
 from torch import nn, optim
 from torch.nn import functional as F
@@ -17,6 +19,7 @@ import librosa
 import logging
 
 logging.getLogger('numba').setLevel(logging.WARNING)
+
 
 import commons
 import utils
@@ -41,6 +44,7 @@ from text.symbols import symbols
 
 torch.backends.cudnn.benchmark = True
 global_step = 0
+global_last_time = time.time()
 
 
 def main():
@@ -48,6 +52,7 @@ def main():
   assert torch.cuda.is_available(), "CPU training is not allowed."
 
   n_gpus = torch.cuda.device_count()
+  print("found {} gpu(s)".format(n_gpus))
   os.environ['MASTER_ADDR'] = 'localhost'
   os.environ['MASTER_PORT'] = '8000'
 
@@ -64,7 +69,7 @@ def run(rank, n_gpus, hps):
     writer = SummaryWriter(log_dir=hps.model_dir)
     writer_eval = SummaryWriter(log_dir=os.path.join(hps.model_dir, "eval"))
 
-  dist.init_process_group(backend='nccl', init_method='env://', world_size=n_gpus, rank=rank)
+  dist.init_process_group(backend='gloo', init_method='env://', world_size=n_gpus, rank=rank)
   torch.manual_seed(hps.train.seed)
   torch.cuda.set_device(rank)
 
@@ -77,11 +82,11 @@ def run(rank, n_gpus, hps):
       rank=rank,
       shuffle=True)
   collate_fn = TextAudioSpeakerCollate()
-  train_loader = DataLoader(train_dataset, num_workers=8, shuffle=False, pin_memory=True,
+  train_loader = DataLoader(train_dataset, num_workers=1, shuffle=False, pin_memory=True,
       collate_fn=collate_fn, batch_sampler=train_sampler)
   if rank == 0:
     eval_dataset = TextAudioSpeakerLoader(hps.data.validation_files, hps.data)
-    eval_loader = DataLoader(eval_dataset, num_workers=8, shuffle=False,
+    eval_loader = DataLoader(eval_dataset, num_workers=1, shuffle=False,
         batch_size=hps.train.batch_size, pin_memory=True,
         drop_last=False, collate_fn=collate_fn)
 
@@ -202,6 +207,15 @@ def train_and_evaluate(rank, epoch, hps, nets, optims, schedulers, scaler, loade
 
     if rank==0:
       if global_step % hps.train.log_interval == 0:
+        global global_last_time
+        now = time.time()
+        use_time = now - global_last_time
+        global_last_time = now
+
+        it_s = float(hps.train.log_interval) / use_time
+
+        print("{}, time: {}, {}it/s".format(global_step, use_time, it_s))
+
         lr = optim_g.param_groups[0]['lr']
         losses = [loss_disc, loss_gen, loss_fm, loss_mel, loss_dur, loss_kl]
         logger.info('Train Epoch: {} [{:.0f}%]'.format(
@@ -215,6 +229,8 @@ def train_and_evaluate(rank, epoch, hps, nets, optims, schedulers, scaler, loade
         scalar_dict.update({"loss/g/{}".format(i): v for i, v in enumerate(losses_gen)})
         scalar_dict.update({"loss/d_r/{}".format(i): v for i, v in enumerate(losses_disc_r)})
         scalar_dict.update({"loss/d_g/{}".format(i): v for i, v in enumerate(losses_disc_g)})
+
+        scalar_dict.update({"efficiency/time":use_time, "efficiency/it":it_s})
         image_dict = { 
             "slice/mel_org": utils.plot_spectrogram_to_numpy(y_mel[0].data.cpu().numpy()),
             "slice/mel_gen": utils.plot_spectrogram_to_numpy(y_hat_mel[0].data.cpu().numpy()), 
