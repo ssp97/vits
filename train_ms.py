@@ -39,16 +39,17 @@ from losses import (
   kl_loss
 )
 from mel_processing import mel_spectrogram_torch, spec_to_mel_torch
-from text.symbols import symbols
+# from text.symbols import symbols
 
 
 torch.backends.cudnn.benchmark = True
 global_step = 0
 global_last_time = time.time()
-
+symbols = []
 
 def main():
   """Assume Single Node Multi GPUs Training Only"""
+  global symbols
   assert torch.cuda.is_available(), "CPU training is not allowed."
 
   n_gpus = torch.cuda.device_count()
@@ -57,6 +58,7 @@ def main():
   os.environ['MASTER_PORT'] = '8000'
 
   hps = utils.get_hparams()
+  symbols = hps.symbols
   mp.spawn(run, nprocs=n_gpus, args=(n_gpus, hps,))
 
 
